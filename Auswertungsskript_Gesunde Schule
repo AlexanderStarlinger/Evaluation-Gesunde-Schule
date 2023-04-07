@@ -1,0 +1,3419 @@
+---
+title: "Gesunde Schule Uni Krems"
+author: "Alexander Starlinger & Lisa Bucher"
+date: "26 9 2022"
+output:
+  html_document:
+    code_folding: show
+    highlight: pygment
+    number_sections: no
+    theme: cosmo
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+---
+
+# Setup
+
+## Packages 
+
+Funktion fuer package import: using() - installiert und importiert alle noetigen packages.
+
+```{r function for package import and load, include=FALSE}
+
+using <- function(...) {
+    libs<-unlist(list(...))
+    req<-unlist(lapply(libs,require,character.only=TRUE))
+    need<-libs[req==FALSE]
+    n<-length(need)
+    if(n>0){
+        libsmsg<-if(n>2) paste(paste(need[1:(n-1)],collapse=", "),",",sep="") else need[1]
+        print(libsmsg)
+        if(n>1){
+            libsmsg<-paste(libsmsg," and ", need[n],sep="")
+        }
+        libsmsg<-paste("The following packages could not be found: ",libsmsg,"\n\r\n\rInstall missing packages?",collapse="")
+        if(winDialog(type = c("yesno"), libsmsg)=="YES"){       
+            install.packages(need)
+            lapply(need,require,character.only=TRUE)
+        }
+    }
+}
+
+```
+
+```{r load packages, include = FALSE}
+
+using("googledrive",
+      "haven",
+      "lme4", "lmerTest", "emmeans", "ggResidpanel", "reghelper",
+      "data.table", 
+      "tidyverse", "tidyr", "dplyr",
+      "sjPlot",
+      "viridis")
+
+#mixedpower ueber github installieren
+
+if (!require("devtools")) {
+  install.packages("devtools", dependencies = TRUE)}
+
+devtools::install_github("DejanDraschkow/mixedpower") 
+
+library(mixedpower)
+
+```
+
+## Import 
+
+Hier wird der Datensatz importiert. Vorher an dieser Stelle das working directory entsprechend setzen.
+
+```{r lokaler Import, include = FALSE}
+
+setwd("C:/Users/Alex/Desktop/Woerk/Freelance Auswertungen/Gesunde Schule Uni Krems/Datensaetze")
+
+data_s <- read_sav("SuS_Arbeitsdatei.sav")
+
+data_l <- read_sav("LK_Arbeitsdatei.sav")
+
+
+
+```
+
+
+```{r datensatz inspecten, include = FALSE}
+
+# SuS
+
+glimpse(data_s)
+nrow(data_s)
+
+colSums(is.na(data_s))
+
+# LK
+
+glimpse(data_l)
+nrow(data_l)
+
+colSums(is.na(data_l))
+
+```
+
+## Aufbereitung
+
+Long format erstellen.
+
+```{r long Format, include = FALSE}
+
+# transformieren: SuS
+
+s_long <-  data_s %>%
+  pivot_longer(
+    cols = !(1:GS_Stufe),
+    names_to = c(".value", "time"), 
+    names_pattern = "(.+)(t0|t1)"
+  )
+
+# transformieren: LK
+
+l_long <- data_l %>%
+  pivot_longer(
+    cols = !(1:rberfahrung_1_t0t1),
+    names_to = c(".value", "time"), 
+    names_pattern = "(.+)(t0|t1)"
+  )                                     #erzeugt cases fuer time == NA -> rausfiltern!
+
+
+```
+
+uebrige Aufbereitung: Variablentypen aendern, umbenennen etc.
+
+```{r tidy data, include = FALSE}
+
+# Klassencode und schulkennzahl: als factor definieren, davor so sortieren 
+# dass Levels die Bezeichnungen beibehalten
+
+s_long$klassencode_t0t1 <- sort(s_long$klassencode_t0t1)
+
+s_long <- s_long %>%
+            mutate(klassencode_t0t1 = factor(klassencode_t0t1, labels = 1:length(unique(s_long$klassencode_t0t1))))
+
+
+s_long <- s_long %>%
+            mutate(skz_t0t1 = factor(skz_t0t1, labels = 1:length(unique(s_long$skz_t0t1))))
+
+#gleiches fuer LK datensatz
+
+l_long$klassencode_t0t1 <- sort(l_long$klassencode_t0t1)
+
+l_long <- l_long %>%
+            mutate(klassencode_t0t1 = factor(klassencode_t0t1, labels = 1:length(unique(l_long$klassencode_t0t1))))
+
+
+l_long <- l_long %>%
+            mutate(skz_t0t1 = factor(skz_t0t1, labels = 1:length(unique(l_long$skz_t0t1))))
+
+
+# time als faktor definieren
+
+
+s_long <- s_long %>%
+             mutate(time = factor(time))
+
+
+# gleiches fuer LK Datensatz
+
+l_long <- l_long %>%
+             mutate(time = factor(time))
+
+
+
+# Treatmentgroup als faktor definieren
+
+
+s_long$Treatmentgroup <- as.factor(s_long$Treatmentgroup)
+
+levels(s_long$Treatmentgroup) <- c("control", "intervention")
+
+# gleiches fuer LK Datensatz
+
+
+l_long$Treatmentgroup <- as.factor(l_long$Treatmentgroup)
+
+levels(l_long$Treatmentgroup) <- c("control", "intervention")
+
+
+# letzten unterstrich aller outcomes entfernen; suffix _t0 oder _t1 der kovariaten
+
+
+names(s_long) <- gsub("_$", "", names(s_long))
+names(s_long) <- gsub("_t0|_t1|_t0t1", "", names(s_long))
+
+#gleiches fuer LK datensatz
+
+names(l_long) <- gsub("_$", "", names(l_long))
+names(l_long) <- gsub("_t0|_t1|_t0t1", "", names(l_long))
+
+```
+
+Datensatz filtern für Subgruppenanalyse
+
+Beinhaltet ALLE Filterungen. Für einzelnes Skript: alles außer eines auskommentieren!
+
+```{r Nach Schultyp/-Stufe filtern}
+
+# 1. AHS 5. Klasse
+
+#s_long <- s_long %>%
+ # filter(rtypstufe == 1)
+
+# 2. AHS 7. Klasse
+
+#s_long <- s_long %>%
+ # filter(rtypstufe == 2)
+
+# 3. Mittelschule 5. Klasse
+
+#s_long <- s_long %>%
+ # filter(rtypstufe == 3)
+
+# 4. Mittelschule 7. Klasse
+
+#s_long <- s_long %>%
+#  filter(rtypstufe == 4)
+
+
+```
+
+
+## Poweranalyse
+
+deaktiviert damit Skript vollständig ausgeführt werden kann. Ergebnisse sind über Workspace (.RData file) importierbar (Objekte power_1_l_max - power_3_s_min).
+
+```{ Poweranalyse: sample sizes und effects vorbereiten, include = FALSE, eval = FALSE}
+
+# 1. min und max n: aus html File von Lisa (13.10) 
+
+s_min_n <- round(3063/2) # outcome: Teilnahme zusaetzliches Sportangebot
+s_max_n <- round(3525/2) # outcome: Gesundheitsbewusstsein: Achtsamkeit
+l_min_n <- round(412/2)  # outcome: Partizipation bei Planung
+l_max_n <- round(624/2)  # outcome: Gesundheitszustand im Allgemeinen
+
+# SESOI 
+
+SESOI_1_s <- c(5.00, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1)
+SESOI_1_l <- c(5.00, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1)
+
+SESOI_2_s <- c(5.00, 0.15, 0.15, 0.1, 0.1, 0.1, 0.1, 0.15)
+SESOI_2_l <- c(5.00, 0.15, 0.15, 0.1, 0.1, 0.1, 0.15)
+
+
+SESOI_3_s <- c(5.00, 0.2, 0.2, 0.1, 0.1, 0.1, 0.1, 0.2)
+SESOI_3_l <- c(5.00, 0.2, 0.2, 0.1, 0.1, 0.1, 0.2)
+
+
+
+{r Poweranalyse: beta .10, include = FALSE, eval = FALSE}
+
+## SuS
+
+power_1_s_min <- mixedpower(subhealth_mod3, 
+                 s_long,
+                 fixed_effects = c("time", "Treatmentgroup"),
+                 simvar = "id",
+                 steps = s_min_n,
+                 critical_value = 2,
+                 n_sim = 1000,
+                 databased = FALSE,
+                 SESOI = SESOI_1_s)
+
+
+power_1_s_max <- mixedpower(subhealth_mod3, 
+                 s_long,
+                 fixed_effects = c("time", "Treatmentgroup"),
+                 simvar = "id",
+                 steps = s_max_n,
+                 critical_value = 2,
+                 n_sim = 1000,
+                 databased = FALSE,
+                 SESOI = SESOI_1_s)
+
+
+
+## LK
+
+power_1_l_min <- mixedpower(lkkoop_7_mod3, 
+                            l_long,
+                            fixed_effects = c("time", "Treatmentgroup"),
+                            simvar = "PersID",
+                            steps = l_min_n,
+                            critical_value = 2,
+                            n_sim = 1000,
+                            databased = FALSE,
+                            SESOI = SESOI_1_l)
+
+
+power_1_l_max <- mixedpower(lkkoop_7_mod3, 
+                            l_long,
+                            fixed_effects = c("time", "Treatmentgroup"),
+                            simvar = "PersID",
+                            steps = l_max_n,
+                            critical_value = 2,
+                            n_sim = 1000,
+                            databased = FALSE,
+                            SESOI = SESOI_1_l)
+
+
+
+## SuS
+
+power_2_s_min <- mixedpower(subhealth_mod3, 
+                            s_long,
+                            fixed_effects = c("time", "Treatmentgroup"),
+                            simvar = "id",
+                            steps = s_min_n,
+                            critical_value = 2,
+                            n_sim = 1000,
+                            databased = FALSE,
+                            SESOI = SESOI_2_s)
+
+
+
+
+power_2_s_max <- mixedpower(subhealth_mod3, 
+                            s_long,
+                            fixed_effects = c("time", "Treatmentgroup"),
+                            simvar = "id",
+                            steps = s_max_n,
+                            critical_value = 2,
+                            n_sim = 1000,
+                            databased = FALSE,
+                            SESOI = SESOI_2_s)
+
+
+
+## LK
+
+power_2_l_min <- mixedpower(lkkoop_7_mod3, 
+                            l_long,
+                            fixed_effects = c("time", "Treatmentgroup"),
+                            simvar = "PersID",
+                            steps = l_min_n,
+                            critical_value = 2,
+                            n_sim = 1000,
+                            databased = FALSE,
+                            SESOI = SESOI_2_l)
+
+
+power_2_l_max <- mixedpower(lkkoop_7_mod3, 
+                            l_long,
+                            fixed_effects = c("time", "Treatmentgroup"),
+                            simvar = "PersID",
+                            steps = l_max_n,
+                            critical_value = 2,
+                            n_sim = 1000,
+                            databased = FALSE,
+                            SESOI = SESOI_2_l)
+
+
+{r Poweranalyse: beta .20, include = FALSE, eval = FALSE}
+
+## SuS
+
+power_3_s_min <- mixedpower(subhealth_mod3, 
+                            s_long,
+                            fixed_effects = c("time", "Treatmentgroup"),
+                            simvar = "id",
+                            steps = s_min_n,
+                            critical_value = 2,
+                            n_sim = 1000,
+                            databased = FALSE,
+                            SESOI = SESOI_3_s)
+
+
+
+
+power_3_s_max <- mixedpower(subhealth_mod3, 
+                            s_long,
+                            fixed_effects = c("time", "Treatmentgroup"),
+                            simvar = "id",
+                            steps = s_max_n,
+                            critical_value = 2,
+                            n_sim = 1000,
+                            databased = FALSE,
+                            SESOI = SESOI_3_s)
+
+
+
+## LK
+
+power_3_l_min <- mixedpower(lkkoop_7_mod3, 
+                            l_long,
+                            fixed_effects = c("time", "Treatmentgroup"),
+                            simvar = "PersID",
+                            steps = l_min_n,
+                            critical_value = 2,
+                            n_sim = 1000,
+                            databased = FALSE,
+                            SESOI = SESOI_3_l)
+
+
+power_3_l_max <- mixedpower(lkkoop_7_mod3, 
+                            l_long,
+                            fixed_effects = c("time", "Treatmentgroup"),
+                            simvar = "PersID",
+                            steps = l_max_n,
+                            critical_value = 2,
+                            n_sim = 1000,
+                            databased = FALSE)
+
+```
+
+# Deskriptive Statistik & Visualisierungen der Outcomes
+
+Mittelwerte der Outcomes nach Zeitpunkt und Treatment.
+
+```{r means by time & Treatmentgroup}
+
+# SuS
+
+s_long %>% 
+  group_by(Treatmentgroup, time) %>% 
+  summarize_at(vars(subhealth:grades),
+              mean, na.rm = TRUE)
+
+# LK
+
+l_long %>% 
+  group_by(Treatmentgroup, time) %>% 
+  summarize_at(vars(lkkoop_1:gfe_wichtig),
+              mean, na.rm = TRUE)
+
+
+
+```
+
+
+Visualisierungsfunktion descr_viz fuer Outcomes: 
+
+Wird dataframe (s_long/l_long) + zu visualisierendes outcome uebergeben, returned histogramm + boxplot pro Zeitpunkt und Treatmentgruppe.
+
+
+```{r viz function}
+
+descr_viz <- function(outcome) {
+  
+  # labs 
+
+  outcome.label <- deparse(substitute(outcome))
+  outcome.label <- gsub("s_long\\$", "", outcome.label)
+
+  # base plot 
+  
+p <- ggplot(s_long, aes(x = outcome, fill = time)) +
+  theme_minimal()
+
+
+
+  # boxplot
+
+boxplot <- p +  geom_boxplot(aes()) +
+            coord_flip() + 
+            facet_grid( ~ Treatmentgroup) +
+            theme(axis.title.x=element_blank(),
+                  axis.text.x=element_blank(),
+                  axis.ticks.x=element_blank()) +
+            labs(x = outcome.label)
+
+  # histogramm
+
+hist <- p +  geom_histogram(aes()) +
+          facet_wrap( ~ Treatmentgroup) +
+  
+          labs(x = outcome.label, y = "Number of students")
+
+
+return(list(boxplot, hist))
+
+}
+
+
+#viz function fuer LK Datensatz
+
+descr_viz_l <- function(outcome) {
+  
+  # labs 
+
+  outcome.label <- deparse(substitute(outcome))
+  outcome.label <- gsub("l_long\\$", "", outcome.label)
+
+  # base plot 
+  
+o <- ggplot(l_long, aes(x = outcome, fill = time)) +
+  theme_minimal()
+
+
+
+  # boxplot
+
+boxplot <- o +  geom_boxplot(aes()) +
+            coord_flip() + 
+            facet_grid( ~ Treatmentgroup) +
+            theme(axis.title.x=element_blank(),
+                  axis.text.x=element_blank(),
+                  axis.ticks.x=element_blank()) +
+            labs(x = outcome.label)
+
+  # histogramm
+
+hist <- o +  geom_histogram(aes()) +
+          facet_wrap( ~ Treatmentgroup) +
+  
+          labs(x = outcome.label, y = "Number of teachers")
+
+
+return(list(boxplot, hist))
+
+}
+
+
+```
+
+
+```{r viz function: Beispiel}
+
+# fuer SuS Datensatz (Beispiel: part_schule)
+
+descr_viz(s_long$part_schule)
+
+# fuer LK Datensatz (Beispiel: gz)
+
+descr_viz_l(l_long$gz)
+
+```
+
+
+# MLMs: nested growth curve models
+
+## Nesting in Schulen testen
+
+```{r Nesting der SuS in Schulen pro Outcome testen,  include = FALSE}
+
+s_outcomes <- s_long %>% select(subhealth:r_phact2)
+nested_test <- sapply(names(s_outcomes), function(x) NULL)
+
+count <- 1
+
+for (i in s_outcomes) {
+  
+  unnested_mod <- lmer(i ~ time * Treatmentgroup + (1|id), data = s_long)
+  nested_mod <- lmer(i ~ time * Treatmentgroup + (1|skz) + (1|skz:id), data = s_long)
+
+  nested_test[[count]] <- anova(unnested_mod, nested_mod, refit = FALSE)$`Pr(>Chisq)`[2]
+  
+  count <- count + 1
+
+}
+
+# schauen fuer welche outcomes 
+
+ifelse(unlist(nested_test) > .05, "n.s.", "sig.") #subhealth und PhActall not nested
+
+```
+
+## Outcomes fuer Fragestellung 1.1
+
+
+### Gesundheitszustand im Allgemeinen
+
+```{r subhealth: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+subhealth_mod1 <- lmer(subhealth ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary(subhealth_mod1)
+
+tab_model(subhealth_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+subhealth_mod2 <- lmer(subhealth ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+# summary(subhealth_mod2)
+
+tab_model(subhealth_mod2)
+
+
+  #Modellvergleich
+
+anova(subhealth_mod1, subhealth_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+```
+
+```{r subhealth: model 3}
+
+  ## mod 3: conditional growth model (Treatmentgroup)
+
+subhealth_mod3 <- lmer(subhealth ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary(subhealth_mod3)
+
+tab_model(subhealth_mod3)
+
+
+  #Modellvergleich 
+
+anova(subhealth_mod2, subhealth_mod3, refit = FALSE)
+
+```
+
+
+Interaktion sig. -> simple effects & Profilplots
+
+Muster: Reduktion in Kontrollgruppe, keine Veraenderung in Interventionsgruppe.
+
+Anm.: falls doch alte Skalierung gewuenscht ist, Zeile mit entsprechendem Kommentar entfernen.
+
+
+```{r subhealth: simple effects und Profilplots, warning = FALSE}
+
+# Simple Effects
+
+
+subhealth_SE <- emmeans(subhealth_mod3, ~ time * Treatmentgroup)
+
+subhealth_SE.test <- pairs(subhealth_SE)
+
+subhealth_SE.test 
+
+# Profilplot
+
+## EMM Objekt erstellen
+
+emms <- emmip(subhealth_mod3, Treatmentgroup ~ time, plotit = FALSE)
+
+## baseplot
+
+base_plot <- ggplot(emms, aes(x = xvar, y = yvar, linetype = tvar))
+
+## PP 
+
+base_plot +
+  geom_errorbar(aes(ymin = yvar-SE, ymax = yvar+SE), width = .15) + 
+  geom_point() +
+  geom_line(aes(y = yvar), group = emms$tvar) + 
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 5)) + #diese zeile entfernen, falls doch alte darstellung gewuenscht
+  labs(linetype = "Treatment") +
+  xlab("Time") +
+  ylab("General health (estimated means)") +
+  theme_minimal() +
+  
+  scale_linetype_discrete(labels = c("control", "intervention"))
+
+
+```
+
+Model Diagnostics. 
+
+```{r subhealth: model diagnostics}
+
+resid_panel(subhealth_mod3)
+
+```
+
+
+### Psychosoziale Gesundheit
+
+```{r psyhealth: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+psyhealth_mod1 <- lmer(psyhealth ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+#summary(psyhealth_mod1)
+
+tab_model(psyhealth_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+psyhealth_mod2 <- lmer(psyhealth ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+#summary(psyhealth_mod2)
+
+tab_model(psyhealth_mod2)
+
+
+  #Modellvergleich
+
+anova(psyhealth_mod1, psyhealth_mod2, refit = FALSE)
+
+```
+
+```{r psyhealth: model 3}
+
+psyhealth_mod3 <- lmer(psyhealth ~  time * Treatmentgroup + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+tab_model(psyhealth_mod3)
+
+```
+
+Model Diagnostics. 
+
+```{r psyhealth: model diagnostics}
+
+resid_panel(psyhealth_mod3)
+
+
+```
+
+### Gesundheitsbewusstsein: Achtsamkeit
+
+```{r hcon_mindful: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+hcon_mindful_mod1 <- lmer(hcon_mindful ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+#summary(hcon_mindful_mod1)
+
+tab_model(hcon_mindful_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+hcon_mindful_mod2 <- lmer(hcon_mindful ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+#summary(hcon_mindful_mod2)
+
+tab_model(hcon_mindful_mod2)
+
+
+  #Modellvergleich
+
+anova(hcon_mindful_mod1, hcon_mindful_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+```
+
+
+```{r hcon_mindful: model 3}
+
+# mod 3: conditional growth model (Treatmentgroup)
+
+hcon_mindful_mod3 <- lmer(hcon_mindful ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary(hcon_mindful_mod3)
+
+tab_model(hcon_mindful_mod3)
+
+
+  # Modellvergleich
+
+anova(hcon_mindful_mod2, hcon_mindful_mod3, refit = FALSE)
+
+```
+
+Model Diagnostics. 
+
+```{r hcon_mindful: model diagnostics}
+
+resid_panel(hcon_mindful_mod3)
+
+```
+
+### Gesundheitsbewusstsein: Eigenverantwortung
+
+```{r hcon_respon: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+hcon_respon_mod1 <- lmer(hcon_respon ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary(hcon_respon_mod1)
+
+tab_model(hcon_respon_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+hcon_respon_mod2 <- lmer(hcon_respon ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+# summary(hcon_respon_mod2)
+
+tab_model(hcon_respon_mod2)
+
+
+  # Modellvergleich
+
+anova(hcon_respon_mod1, hcon_respon_mod2, refit = FALSE)
+
+```
+
+```{r hcon_respon: model 3}
+
+hcon_respon_mod3 <- lmer(hcon_respon ~time * Treatmentgroup + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+tab_model(hcon_respon_mod3)
+
+```
+
+Model Diagnostics. 
+
+```{r hcon_respon: model diagnostics}
+
+resid_panel(hcon_respon_mod3)
+
+```
+
+
+### Gesundheitsbewusstsein: Motivation
+
+```{r hcon_motiv: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+hcon_motiv_mod1 <- lmer(hcon_motiv ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+summary(hcon_motiv_mod1)
+tab_model(hcon_motiv_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+hcon_motiv_mod2 <- lmer(hcon_motiv ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+summary(hcon_motiv_mod2)
+tab_model(hcon_motiv_mod2)
+
+
+  #Modellvergleich
+
+anova(hcon_motiv_mod1, hcon_motiv_mod2, refit = FALSE)
+
+```
+
+```{r hcon_motiv: model 3}
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+# mod 3: conditional growth model (Treatmentgroup )
+
+hcon_motiv_mod3 <- lmer(hcon_motiv ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary(hcon_motiv_mod3)
+tab_model(hcon_motiv_mod3)
+
+
+  # Modellvergleich
+
+anova(hcon_motiv_mod2, hcon_motiv_mod3, refit = FALSE)
+
+```
+
+Model Diagnostics. 
+
+```{r hcon_motiv: model diagnostics}
+
+resid_panel(hcon_motiv_mod3)
+
+```
+
+### Verbundenheit zur Schule
+
+```{r schcon: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+schcon_mod1 <- lmer(schcon ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+summary(schcon_mod1)
+tab_model(schcon_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+schcon_mod2 <- lmer(schcon ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+summary(schcon_mod2)
+tab_model(schcon_mod2)
+
+
+  # Modellvergleich
+
+anova(schcon_mod1, schcon_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+```
+
+```{r schcon: model 3}
+
+# mod 3: conditional growth model (Treatmentgroup)
+
+schcon_mod3 <- lmer(schcon ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary(schcon_mod3)
+
+tab_model(schcon_mod3)
+
+
+  #Modellvergleich
+
+anova(schcon_mod2, schcon_mod3, refit = FALSE)
+
+```
+
+Model Diagnostics. 
+
+```{r schcon: model diagnostics}
+
+resid_panel(schcon_mod3)
+
+```
+
+### Engagement der Lehrkraefte
+
+```{r englk: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+englk_mod1 <- lmer(englk ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+summary(englk_mod1)
+tab_model(englk_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+englk_mod2 <- lmer(englk ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+# summary(englk_mod2)
+tab_model(englk_mod2)
+
+
+  # Modellvergleich
+
+anova(englk_mod1, englk_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+```
+
+```{r englk: model 3}
+
+# mod 3: conditional growth model (Treatmentgroup )
+
+englk_mod3 <- lmer(englk ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary(englk_mod3)
+tab_model(englk_mod3)
+
+
+  # Modellvergleich
+
+anova(englk_mod2, englk_mod3, refit = FALSE)
+
+```
+
+Model Diagnostics. 
+
+```{r englk: model diagnostics}
+
+resid_panel(englk_mod3)
+
+```
+
+### Gemeinschaft der Schueler*innen
+
+```{r gemein: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+gemein_mod1 <- lmer(gemein ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary(gemein_mod1)
+tab_model(gemein_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+gemein_mod2 <- lmer(gemein ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+# summary(gemein_mod2)
+tab_model(gemein_mod2)
+
+
+  #Modellvergleich
+
+anova(gemein_mod1, gemein_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+```
+
+```{r gemein: model 3}
+
+# mod 3: conditional growth model (Treatmentgroup )
+
+gemein_mod3 <- lmer(gemein ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary(gemein_mod3)
+
+tab_model(gemein_mod3)
+
+
+  #Modellvergleich
+
+anova(gemein_mod2, gemein_mod3, refit = FALSE)
+
+```
+
+Model Diagnostics. 
+
+```{r gemein: model diagnostics}
+
+resid_panel(gemein_mod3)
+
+```
+
+### Partizipation: Schule
+
+```{r part_schule: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+part_schule_mod1 <- lmer(part_schule ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+summary(part_schule_mod1)
+tab_model(part_schule_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+part_schule_mod2 <- lmer(part_schule ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+summary(part_schule_mod2)
+tab_model(part_schule_mod2)
+
+
+  #Modellvergleich
+
+anova(part_schule_mod1, part_schule_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+```
+
+```{r part_schule: model 3}
+
+# mod 3: conditional growth model (Treatmentgroup)
+
+part_schule_mod3 <- lmer(part_schule ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary(part_schule_mod3)
+
+tab_model(part_schule_mod3)
+
+
+  # Modellvergleich
+
+anova(part_schule_mod2, part_schule_mod3, refit = FALSE)
+
+```
+
+
+Interaktion sig. -> simple effects & Profilplots
+
+Muster: Keine Veraenderung in Kontrollgruppe, Reduktion in Interventionsgruppe.
+
+
+```{r part_schule: simple effects und Profilplots, warning = FALSE}
+
+# Simple Effects
+
+
+part_schule_SE <- emmeans(part_schule_mod3, ~ time * Treatmentgroup)
+
+part_schule_SE.test <- pairs(part_schule_SE)
+
+part_schule_SE.test 
+
+# Profilplot
+
+## EMM Objekt erstellen
+
+emms <- emmip(part_schule_mod3, Treatmentgroup ~ time, plotit = FALSE)
+
+## baseplot
+
+base_plot <- ggplot(emms, aes(x = xvar, y = yvar, linetype = tvar))
+
+## PP 
+
+base_plot +
+  geom_errorbar(aes(ymin = yvar-SE, ymax = yvar+SE), width = .15) + 
+  geom_point() +
+  geom_line(aes(y = yvar), group = emms$tvar) + 
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 5)) + 
+  labs(linetype = "Treatment") +
+  xlab("Time") +
+  ylab("School Participation (estimated means)") +
+  theme_minimal() +
+  
+  scale_linetype_discrete(labels = c("control", "intervention"))
+
+
+```
+
+Model Diagnostics. 
+
+```{r part_schule: model diagnostics}
+
+resid_panel(part_schule_mod3)
+
+```
+
+
+### Partizipation: Klasse
+
+```{r part_klasse: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+part_klasse_mod1 <- lmer(part_klasse ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+#summary(part_klasse_mod1)
+tab_model(part_klasse_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+part_klasse_mod2 <- lmer(part_klasse ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+summary(part_klasse_mod2)
+tab_model(part_klasse_mod2)
+
+
+  #Modellvergleich
+
+anova(part_klasse_mod1, part_klasse_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+```
+
+```{r part_klasse: model 3}
+
+# mod 3: conditional growth model (Treatmentgroup )
+
+part_klasse_mod3 <- lmer(part_klasse ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+#summary(part_klasse_mod3)
+tab_model(part_klasse_mod3)
+
+
+  #Modellvergleich
+
+anova(part_klasse_mod2, part_klasse_mod3, refit = FALSE)
+
+```
+
+
+Model Diagnostics. 
+
+```{r part_klasse: model diagnostics}
+
+resid_panel(part_klasse_mod3)
+
+```
+
+
+### Partizipation: Gremien
+
+```{r part_gremien: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+part_gremien_mod1 <- lmer(part_gremien ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+#summary(part_gremien_mod1)
+tab_model(part_gremien_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+part_gremien_mod2 <- lmer(part_gremien ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+summary(part_gremien_mod2)
+tab_model(part_gremien_mod2)
+
+
+  #Modellvergleich
+
+anova(part_gremien_mod1, part_gremien_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+```
+
+```{r part_gremien: model 3}
+
+# mod 3: conditional growth model (Treatmentgroup )
+
+part_gremien_mod3 <- lmer(part_gremien ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+#summary(part_gremien_mod3)
+tab_model(part_gremien_mod3)
+
+
+  #Modellvergleich
+
+anova(part_gremien_mod2, part_gremien_mod3, refit = FALSE)
+
+```
+
+Model Diagnostics. 
+
+```{r part_gremien: model diagnostics}
+
+resid_panel(part_gremien_mod3)
+
+```
+
+
+### Partizipation: Wichtigkeit
+
+```{r part_wichtig: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+part_wichtig_mod1 <- lmer(part_wichtig ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+summary(part_wichtig_mod1)
+tab_model(part_wichtig_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+part_wichtig_mod2 <- lmer(part_wichtig ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+#summary(part_wichtig_mod2)
+tab_model(part_wichtig_mod2)
+
+
+  #Modellvergleich
+
+anova(part_wichtig_mod1, part_wichtig_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+```
+
+```{r part_wichtig: model 3}
+
+# mod 3: conditional growth model (Treatmentgroup)
+
+part_wichtig_mod3 <- lmer(part_wichtig ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary(part_wichtig_mod3)
+tab_model(part_wichtig_mod3)
+
+
+  #Modellvergleich
+
+anova(part_wichtig_mod2, part_wichtig_mod3, refit = FALSE)
+
+```
+
+Model Diagnostics. 
+
+```{r part_wichtig: model diagnostics}
+
+resid_panel(part_wichtig_mod3)
+
+```
+
+### Freude an Bewegung
+
+```{r paces: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+paces_mod1 <- lmer(paces ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+summary(paces_mod1)
+tab_model(paces_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+paces_mod2 <- lmer(paces ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+summary(paces_mod2)
+tab_model(paces_mod2)
+
+
+  #Modellvergleich
+
+anova(paces_mod1, paces_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+```
+
+```{r paces: model 3}
+
+# mod 3: conditional growth model (Treatmentgroup )
+
+paces_mod3 <- lmer(paces ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+#summary(paces_mod3)
+tab_model(paces_mod3)
+
+
+  #Modellvergleich
+
+anova(paces_mod2, paces_mod3, refit = FALSE)
+
+```
+
+Model Diagnostics. 
+
+```{r paces: model diagnostics}
+
+resid_panel(paces_mod3)
+
+```
+
+### Bewegung: Aktivitaet in den letzten 7 Tagen (Anzahl Tage)
+
+```{r PhActall: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+PhActall_mod1 <- lmer(PhActall ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+summary(PhActall_mod1)
+tab_model(PhActall_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+PhActall_mod2 <- lmer(PhActall ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+summary(PhActall_mod2)
+tab_model(PhActall_mod2)
+
+
+  #Modellvergleich
+
+anova(PhActall_mod1, PhActall_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+```
+
+```{r PhActall: model 3}
+
+# mod 3: conditional growth model (Treatmentgroup )
+
+PhActall_mod3 <- lmer(PhActall ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+#summary(PhActall_mod3)
+tab_model(PhActall_mod3)
+
+
+  #Modellvergleich
+
+anova(PhActall_mod2, PhActall_mod3, refit = FALSE)
+
+```
+
+Model Diagnostics. 
+
+```{r PhActall: model diagnostics}
+
+resid_panel(PhActall_mod3)
+
+```
+
+### Bewegung im Unterricht/Pause
+
+```{r PhAct4_MW: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+PhAct4_MW_mod1 <- lmer(PhAct4_MW ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+summary(PhAct4_MW_mod1)
+tab_model(PhAct4_MW_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+PhAct4_MW_mod2 <- lmer(PhAct4_MW ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+summary(PhAct4_MW_mod2)
+tab_model(PhAct4_MW_mod2)
+
+
+  #Modellvergleich
+
+anova(PhAct4_MW_mod1, PhAct4_MW_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+```
+
+```{r PhAct4_MW: model 3}
+# mod 3: conditional growth model (Treatmentgroup )
+
+PhAct4_MW_mod3 <- lmer(PhAct4_MW ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+#summary(PhAct4_MW_mod3)
+
+tab_model(PhAct4_MW_mod3)
+
+
+  #Modellvergleich
+
+anova(PhAct4_MW_mod2, PhAct4_MW_mod3, refit = FALSE)
+
+```
+
+Model Diagnostics. 
+
+```{r PhAct4_MW: model diagnostics}
+
+resid_panel(PhAct4_MW_mod3)
+
+```
+
+Interaktion sig. -> simple effects & Profilplots
+
+Muster: Reduktion in Intervention, keine Veraenderung in Kontrolle.
+
+```{r Bewegung in Unterricht/Pause: simple effects und Profilplots, warning = FALSE}
+
+# Simple Effects
+
+
+PhAct4_MW_SE <- emmeans(PhAct4_MW_mod3, ~ time * Treatmentgroup)
+
+PhAct4_MW_SE.test <- pairs(PhAct4_MW_SE)
+
+PhAct4_MW_SE.test 
+
+# Profilplot
+
+## EMM Objekt erstellen
+
+emms <- emmip(PhAct4_MW_mod3, Treatmentgroup ~ time, plotit = FALSE)
+
+## baseplot
+
+base_plot <- ggplot(emms, aes(x = xvar, y = yvar, linetype = tvar))
+
+## PP 
+
+base_plot +
+  geom_errorbar(aes(ymin = yvar-SE, ymax = yvar+SE), width = .15) + 
+  geom_point() +
+  geom_line(aes(y = yvar), group = emms$tvar) + 
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 2)) + 
+  labs(linetype = "Treatment") +
+  xlab("Time") +
+  ylab("Movement in classroom/during break (estimated means)") +
+  theme_minimal() +
+  
+  scale_linetype_discrete(labels = c("control", "intervention"))
+
+
+```
+
+### Ernaehrungsscore
+
+```{r food_score: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+food_score_mod1 <- lmer(food_score ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+summary(food_score_mod1)
+tab_model(food_score_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+food_score_mod2 <- lmer(food_score ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+# summary(food_score_mod2)
+tab_model(food_score_mod2)
+
+
+  #Modellvergleich
+
+anova(food_score_mod1, food_score_mod2, refit = FALSE)
+
+```
+
+
+```{r food_score: model 3}
+
+# mod 3: conditional growth model (Treatmentgroup )
+
+food_score_mod3 <- lmer(food_score ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+#summary(PhActall_mod3)
+
+tab_model(food_score_mod3)
+
+
+  #Modellvergleich
+
+anova(food_score_mod2, food_score_mod3, refit = FALSE)
+
+```
+
+
+```{r food_score: model diagnostics}
+
+resid_panel(food_score_mod3)
+
+```
+
+
+### Bewegung: Zeit/Tage am Handy
+
+```{r sed: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+sed_mod1 <- lmer(sed ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+summary(sed_mod1)
+tab_model(sed_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+sed_mod2 <- lmer(sed ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+# summary(sed_mod2)
+tab_model(sed_mod2)
+
+
+  #Modellvergleich
+
+anova(sed_mod1, sed_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+```
+
+```{r sed: model 3}
+
+# mod 3: conditional growth model (Treatmentgroup )
+
+sed_mod3 <- lmer(sed ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+#summary(sed_mod3)
+tab_model(sed_mod3)
+
+
+  # Modellvergleich
+
+anova(sed_mod2, sed_mod3, refit = FALSE)
+
+```
+
+Model Diagnostics.
+
+```{r sed: model diagnostics}
+
+resid_panel(sed_mod3)
+
+```
+
+### Bewegung: Teilnahme an zusaetzlichem Bewegungs- und Sportangebot
+
+```{r r_phact2: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+r_phact2_mod1 <- lmer(r_phact2 ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+summary(r_phact2_mod1)
+tab_model(r_phact2_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+r_phact2_mod2 <- lmer(r_phact2 ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+# summary(r_phact2_mod2)
+tab_model(r_phact2_mod2)
+
+
+  #Modellvergleich
+
+anova(r_phact2_mod1, r_phact2_mod2, refit = FALSE)
+
+  ## Modellvergleich nicht signifikant --> daher hier stop
+  ## Modell 2 interpretieren
+
+```
+
+Haupteffekt Treatmentgrouppe signifikant.
+
+```{r r_phact2: model 3}
+
+r_phact2_mod3 <- lmer(r_phact2 ~ time * Treatmentgroup + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+tab_model(r_phact2_mod3)
+
+```
+
+Model Diagnostics (hier mit mod2).
+
+```{r r_phact2: model diagnostics}
+
+resid_panel(r_phact2_mod3)
+
+```
+
+### Semesternoten zu T1
+
+ 2-level model: ohne time (nur T1 Daten!)
+
+```{r grades}
+
+# mod 1: unconditional intercept only
+
+
+grades_mod1 <- lmer(grades ~ ssex + ses + AlterB + cm +  (1|skz), data = s_long)
+
+#summary(grades_mod1)
+
+tab_model(grades_mod1)
+
+
+# mod 2: conditional 2-level model 
+
+grades_mod2 <- lmer(grades ~ Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz), data = s_long)
+
+#summary(grades_mod2)
+
+tab_model(grades_mod2)
+
+  #Modellvergleich
+
+anova(grades_mod1, grades_mod2, refit = FALSE)
+
+
+```
+
+Model Diagnostics.
+
+```{r grades: model diagnostics}
+
+resid_panel(grades_mod2)
+
+```
+
+## Outcomes fuer Fragestellung 3.1:
+
+### GF Rahmenbedingungen: Raeumliche Umgebung
+
+```{r health_schoolenv: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+health_schoolenv_mod1 <- lmer(health_schoolenv ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+summary(health_schoolenv_mod1)
+tab_model(health_schoolenv_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+health_schoolenv_mod2 <- lmer(health_schoolenv ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+summary(health_schoolenv_mod2)
+tab_model(health_schoolenv_mod2)
+
+
+  #Modellvergleich
+
+anova(health_schoolenv_mod1, health_schoolenv_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+```
+
+```{r health_schoolenv: model 3}
+
+# mod 3: conditional growth model (Treatmentgroup)
+
+health_schoolenv_mod3 <- lmer(health_schoolenv ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary(health_schoolenv_mod3)
+
+tab_model(health_schoolenv_mod3)
+
+
+  #Modellvergleich
+
+anova(health_schoolenv_mod2, health_schoolenv_mod3, refit = FALSE)
+
+```
+
+Model Diagnostics.
+
+```{r health_schoolenv: model diagnostics}
+
+resid_panel(health_schoolenv_mod3)
+
+```
+
+### GF Rahmenbedingungen: Foerderung v. Gesundheitskompetenz in d. Schule
+
+```{r health_lit: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+health_lit_mod1 <- lmer(health_lit ~ ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+#summary(health_lit_mod1)
+tab_model(health_lit_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+health_lit_mod2 <- lmer(health_lit ~  time + ssex + ses + AlterB + cm + (1|skz) + (1|skz:id), data = s_long)
+
+#summary(health_lit_mod2)
+tab_model(health_lit_mod2)
+
+
+  #Modellvergleich
+
+anova(health_lit_mod1, health_lit_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+```
+
+```{r health_lit: model 3}
+
+# mod 3: conditional growth model (Treatmentgroup)
+
+health_lit_mod3 <- lmer(health_lit ~ time * Treatmentgroup + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+#summary(health_lit_mod3)
+
+tab_model(health_lit_mod3)
+
+
+  #Modellvergleich
+
+anova(health_lit_mod2, health_lit_mod3, refit = FALSE)
+
+```
+
+Model Diagnostics.
+
+```{r health_lit: model diagnostics}
+
+resid_panel(health_lit_mod3)
+
+```
+
+# Auswertung der Fragestellung 1.3 (Qualitaet der Implementierung)
+
+### 1. Subhealth
+
+
+```{r Qualitaet der Implementierung: subhealth}
+
+subhealth_impl_mod <- lmer(subhealth ~ time * Impl + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary
+
+summary(subhealth_impl_mod)
+tab_model(subhealth_impl_mod)
+
+```
+Model Diagnostics.
+
+```{r subhealth_impl: model diagnostics}
+
+resid_panel(subhealth_impl_mod)
+
+```
+
+### 2. Food Score
+
+```{r Qualitaet der Implementierung: food_score}
+
+food_score_impl_mod <- lmer(food_score ~ time * Impl + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary
+
+summary(food_score_impl_mod)
+tab_model(food_score_impl_mod)
+
+
+```
+
+Model Diagnostics.
+
+```{r food_score_impl: model diagnostics}
+
+resid_panel(food_score_impl_mod)
+
+```
+### 3. Bewegung im Unterricht/Pause
+
+Haupteffekt nicht signifikant, aber Interaktion -> simple slopes + plot!
+
+```{r Qualitaet der Implementierung: PhAcT4_MW}
+
+PhAcT4_MW_impl_mod <- lmer(PhAct4_MW ~ time * Impl + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary
+
+summary(PhAcT4_MW_impl_mod)
+tab_model(PhAcT4_MW_impl_mod)
+
+
+```
+
+Simple Slopes: 
+
+
+```{r_Qualitaet_der_Impl_PhAcT4_MW_ss_plot}
+
+dev.off()
+
+# Simple Slopes
+
+
+PhAct4_MW_impl_SS <- emtrends(PhAcT4_MW_impl_mod, pairwise ~ time, var = "Impl")
+
+PhAct4_MW_impl_SS
+
+  # p-values für simple slopes holen
+
+emtr <- as.data.frame(PhAct4_MW_impl_SS$emtrends)
+tvalues <- emtr$Impl.trend/emtr$SE
+dfs <- emtr$df
+
+phAct4_ss_pvalues <- 2*pt(-abs(tvalues), dfs)
+names(phAct4_ss_pvalues) <- c("t0", "t1")
+
+#print p values
+
+phAct4_ss_pvalues
+
+
+# Interaction Plot
+
+base_plot <- emmip(PhAcT4_MW_impl_mod, time ~ Impl, cov.reduce = range)
+
+base_plot +
+  scale_y_continuous(expand = c(0, 0), limits = c(0, 2)) +
+  xlab("Quality of Implementation") +
+  ylab("Movement in classroom/during break") +
+  theme_minimal() 
+
+
+```
+
+Model Diagnostics.
+
+```{r Qualitaet der Implementierung: PhAcT4_MW: model diagnostics}
+
+resid_panel(PhAcT4_MW_impl_mod)
+
+```
+
+
+### 4. GF Rahmenbedingungen: Raeumliche Umgebung
+
+Haupteffekt nicht signifikant, aber Interaktion -> simple slopes + plot!
+
+```{r Qualitaet der Implementierung: health_schoolenv}
+
+health_schoolenv_impl_mod <- lmer(health_schoolenv ~ time * Impl + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary
+
+summary(health_schoolenv_impl_mod)
+tab_model(health_schoolenv_impl_mod)
+
+```
+
+Simple Slopes: gleicher Fall wie bei 3. (beide slopes fuer sich nicht sign., Kontrast schon weil entgegengerichtet).
+
+```{r Qualitaet der Implementierung: health_schoolenv: simple slopes + plot}
+
+# Simple Slopes
+
+
+health_schoolenv_impl_SS <- emtrends(health_schoolenv_impl_mod, pairwise ~ time, var = "Impl")
+health_schoolenv_impl_SS
+
+  # p-values für simple slopes holen
+
+emtr <- as.data.frame(health_schoolenv_impl_SS$emtrends)
+tvalues <- emtr$Impl.trend/emtr$SE
+dfs <- emtr$df
+
+health_schoolenv_ss_pvalues <- 2*pt(-abs(tvalues), dfs)
+names(health_schoolenv_ss_pvalues) <- c("t0", "t1")
+
+
+#print p values
+
+health_schoolenv_ss_pvalues
+
+
+
+# Interaction Plot
+
+base_plot <- emmip(health_schoolenv_impl_mod, time ~ Impl, cov.reduce = range)
+
+base_plot +
+  scale_y_continuous(expand = c(0, 0), limits = range(s_long$health_schoolenv, na.rm = TRUE)) +
+  xlab("Quality of Implementation") +
+  ylab("Movement in classroom/during break") +
+  theme_minimal() 
+
+
+```
+
+Model Diagnostics.
+
+```{r Qualitaet der Implementierung: health_schoolenv: model diagnostics}
+
+resid_panel(health_schoolenv_impl_mod)
+
+```
+
+### 5. Gemeinschaft der SchuelerInnen
+
+
+```{r Qualitaet der Implementierung: gemein}
+
+gemein_impl_mod <- lmer(gemein ~ time * Impl + ssex + ses + AlterB + cm +  (1|skz) + (1|skz:id), data = s_long)
+
+# summary
+
+summary(gemein_impl_mod)
+tab_model(gemein_impl_mod)
+
+```
+
+Model Diagnostics.
+
+```{r Qualitaet der Implementierung: gemein: model diagnostics}
+
+resid_panel(gemein_impl_mod)
+
+```
+
+# Auswertung der Fragestellung 2.1 (Lehrkraefte Datensatz)
+
+
+## Nesting in Schulen testen
+
+analog zu Test mit Schueler*innen Datensatz
+
+
+```{r Nesting der LK in Schulen pro Outcome testen,  include = FALSE}
+
+l_outcomes <- l_long %>% select(lkkoop_1:gfe_wichtig)
+nested_test_l <- sapply(names(l_outcomes), function(x) NULL)
+
+count <- 1
+
+for (i in l_outcomes) {
+  
+  unnested_mod_l <- lmer(i ~ time * Treatmentgroup + (1|PersID), data = l_long)
+  nested_mod_l <- lmer(i ~ time * Treatmentgroup + (1|skz) + (1|skz:PersID), data = l_long)
+
+  nested_test_l[[count]] <- anova(unnested_mod_l, nested_mod_l, refit = FALSE)$`Pr(>Chisq)`[2]
+  
+  count <- count + 1
+
+}
+
+# schauen fuer welche outcomes 
+
+ifelse(unlist(nested_test_l) > .05, "n.s.", "sig.")
+
+#gft_4
+#gz
+#lz
+#lkkollegium
+#gfn
+#ps_wichtig
+#gfe_engage
+#gfe_wichtig
+
+```
+
+
+## Outcomes fuer Fragestellung 2.1
+
+### Kooperation 1 (Einzelitem)
+
+```{r lkkoop_1: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+lkkoop_1_mod1 <- lmer(lkkoop_1 ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_1_mod1)
+
+tab_model(lkkoop_1_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+lkkoop_1_mod2 <- lmer(lkkoop_1 ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_1_mod2)
+
+tab_model(lkkoop_1_mod2)
+
+
+  #Modellvergleich
+
+anova(lkkoop_1_mod1, lkkoop_1_mod2, refit = FALSE)
+
+```
+
+```{r lkkoop_1: model 3}
+
+lkkoop_1_mod3 <- lmer(lkkoop_1 ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_1_mod3)
+
+tab_model(lkkoop_1_mod3)
+
+
+```
+
+Model Diagnostics. 
+
+```{r lkkoop_1: model diagnostics}
+
+resid_panel(lkkoop_1_mod3)
+
+
+```
+
+
+### Kooperation 2 (Einzelitem)
+
+
+```{r lkkoop_2: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+lkkoop_2_mod1 <- lmer(lkkoop_2 ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_2_mod1)
+
+tab_model(lkkoop_2_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+lkkoop_2_mod2 <- lmer(lkkoop_2 ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_2_mod2)
+
+tab_model(lkkoop_2_mod2)
+
+
+  #Modellvergleich
+
+anova(lkkoop_2_mod1, lkkoop_2_mod2, refit = FALSE)
+
+```
+
+```{r lkkoop_2: model 3, include = FALSE}
+
+lkkoop_2_mod3 <- lmer(lkkoop_2 ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_2_mod3)
+
+tab_model(lkkoop_2_mod3)
+
+```
+
+Model Diagnostics. 
+
+```{r lkkoop_2: model diagnostics}
+
+resid_panel(lkkoop_2_mod3)
+
+```
+
+
+### Kooperation 3 (Einzelitem)
+
+
+```{r lkkoop_3: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+lkkoop_3_mod1 <- lmer(lkkoop_3 ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_3_mod1)
+
+tab_model(lkkoop_3_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+lkkoop_3_mod2 <- lmer(lkkoop_3 ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_3_mod2)
+
+tab_model(lkkoop_3_mod2)
+
+
+  #Modellvergleich
+
+anova(lkkoop_3_mod1, lkkoop_3_mod2, refit = FALSE)
+
+```
+
+```{r lkkoop_3: model 3}
+
+lkkoop_3_mod3 <- lmer(lkkoop_3 ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_3_mod2)
+
+tab_model(lkkoop_3_mod3)
+
+```
+
+Model Diagnostics. 
+
+```{r lkkoop_3: model diagnostics}
+
+resid_panel(lkkoop_3_mod3)
+
+```
+
+
+### Kooperation 4 (Einzelitem)
+
+```{r lkkoop_4: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+lkkoop_4_mod1 <- lmer(lkkoop_4 ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_4_mod1)
+
+tab_model(lkkoop_4_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+lkkoop_4_mod2 <- lmer(lkkoop_4 ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_4_mod2)
+
+tab_model(lkkoop_4_mod2)
+
+
+  #Modellvergleich
+
+anova(lkkoop_4_mod1, lkkoop_4_mod2, refit = FALSE)
+
+```
+
+```{r lkkoop_4: model 3}
+
+lkkoop_4_mod3 <- lmer(lkkoop_4 ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_4_mod2)
+
+tab_model(lkkoop_4_mod3)
+
+```
+
+Model Diagnostics. 
+
+```{r lkkoop_4: model diagnostics}
+
+resid_panel(lkkoop_4_mod3)
+
+```
+
+
+### Kooperation 5 (Einzelitem)
+
+
+```{r lkkoop_5: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+lkkoop_5_mod1 <- lmer(lkkoop_5 ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_5_mod1)
+
+tab_model(lkkoop_5_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+lkkoop_5_mod2 <- lmer(lkkoop_5 ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_5_mod2)
+
+tab_model(lkkoop_5_mod2)
+
+
+  #Modellvergleich
+
+anova(lkkoop_5_mod1, lkkoop_5_mod2, refit = FALSE)
+
+```
+
+```{r lkkoop_5: model 3}
+
+lkkoop_5_mod3 <- lmer(lkkoop_5 ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_5_mod2)
+
+tab_model(lkkoop_5_mod3)
+
+
+```
+
+Model Diagnostics. 
+
+```{r lkkoop_5: model diagnostics}
+
+resid_panel(lkkoop_5_mod3)
+
+```
+
+### Kooperation 6 (Einzelitem)
+
+```{r lkkoop_6: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+lkkoop_6_mod1 <- lmer(lkkoop_6 ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_6_mod1)
+
+tab_model(lkkoop_6_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+lkkoop_6_mod2 <- lmer(lkkoop_6 ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_6_mod2)
+
+tab_model(lkkoop_6_mod2)
+
+
+  #Modellvergleich
+
+anova(lkkoop_6_mod1, lkkoop_6_mod2, refit = FALSE)
+
+```
+
+```{r lkkoop_6: model 3}
+
+
+lkkoop_6_mod3 <- lmer(lkkoop_6 ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_6_mod2)
+
+tab_model(lkkoop_6_mod3)
+
+
+
+```
+
+
+Model Diagnostics. 
+
+```{r lkkoop_6: model diagnostics}
+
+resid_panel(lkkoop_6_mod3)
+
+```
+
+
+### Kooperation 7 (Einzelitem)
+
+```{r lkkoop_7: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+lkkoop_7_mod1 <- lmer(lkkoop_7 ~ sex + age + sum_rrberfahrung +  (1|skz) + (1|skz:PersID), data = l_long)
+
+# summary(lkkoop_7_mod1)
+
+tab_model(lkkoop_7_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+lkkoop_7_mod2 <- lmer(lkkoop_7 ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+# summary(lkkoop_7_mod2)
+
+tab_model(lkkoop_7_mod2)
+
+
+  #Modellvergleich
+
+anova(lkkoop_7_mod1, lkkoop_7_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+```
+
+```{r lkkoop_7: model 3}
+
+  ## mod 3: conditional growth model (Treatmentgroup)
+
+lkkoop_7_mod3 <- lmer(lkkoop_7 ~ time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+# summary(lkkoop_7_mod3)
+
+tab_model(lkkoop_7_mod3)
+
+
+  #Modellvergleich 
+
+anova(lkkoop_7_mod2, lkkoop_7_mod3, refit = FALSE)
+
+```
+
+Model Diagnostics. 
+
+```{r lkkoop_7: model diagnostics}
+
+resid_panel(lkkoop_7_mod3)
+
+```
+
+### Kooperation 8 (Einzelitem)
+
+
+```{r lkkoop_8: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+lkkoop_8_mod1 <- lmer(lkkoop_8 ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_8_mod1)
+
+tab_model(lkkoop_8_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+lkkoop_8_mod2 <- lmer(lkkoop_8 ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_8_mod2)
+
+tab_model(lkkoop_8_mod2)
+
+
+  #Modellvergleich
+
+anova(lkkoop_8_mod1, lkkoop_8_mod2, refit = FALSE)
+
+```
+
+Haupteffekt Treatmentgrouppe signifikant.
+
+```{r lkkoop_8: model 3}
+
+lkkoop_8_mod3 <- lmer(lkkoop_8 ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkoop_8_mod2)
+
+tab_model(lkkoop_8_mod3)
+
+
+
+```
+
+Model Diagnostics. 
+
+```{r lkkoop_8: model diagnostics}
+
+resid_panel(lkkoop_8_mod3)
+
+```
+
+
+### Umfang Engagement: Ernaehrung (Einzelitem)
+
+
+```{r gft_1: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+gft_1_mod1 <- lmer(gft_1 ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gft_1_mod1)
+
+tab_model(gft_1_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+gft_1_mod2 <- lmer(gft_1 ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gft_1_mod2)
+
+tab_model(gft_1_mod2)
+
+
+  #Modellvergleich
+
+anova(gft_1_mod1, gft_1_mod2, refit = FALSE)
+
+```
+
+```{r gft_1: model 3, include = FALSE}
+
+gft_1_mod3 <- lmer(gft_1 ~ time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gft_1_mod2)
+
+tab_model(gft_1_mod3)
+
+
+```
+
+
+Model Diagnostics. 
+
+```{r gft_1: model diagnostics}
+
+resid_panel(gft_1_mod3)
+
+```
+
+
+### Umfang Engagement: Bewegung (Einzelitem)
+
+
+```{r gft_2: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+gft_2_mod1 <- lmer(gft_2 ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gft_2_mod1)
+
+tab_model(gft_2_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+gft_2_mod2 <- lmer(gft_2 ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gft_2_mod2)
+
+tab_model(gft_2_mod2)
+
+
+  #Modellvergleich
+
+anova(gft_2_mod1, gft_2_mod2, refit = FALSE)
+
+```
+
+```{r gft_2: model 3}
+
+
+gft_2_mod3 <- lmer(gft_2 ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gft_2_mod2)
+
+tab_model(gft_2_mod3)
+
+
+```
+
+Model Diagnostics. 
+
+```{r gft_2: model diagnostics}
+
+resid_panel(gft_2_mod3)
+
+```
+
+
+### Umfang Engagement: oekologie und Umwelt (Einzelitem)
+
+
+```{r gft_3: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+gft_3_mod1 <- lmer(gft_3 ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gft_3_mod1)
+
+tab_model(gft_3_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+gft_3_mod2 <- lmer(gft_3 ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gft_3_mod2)
+
+tab_model(gft_3_mod2)
+
+
+  #Modellvergleich
+
+anova(gft_3_mod1, gft_3_mod2, refit = FALSE)
+
+```
+
+```{r gft_3: model 3}
+
+gft_3_mod3 <- lmer(gft_3 ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gft_3_mod2)
+
+tab_model(gft_3_mod3)
+
+
+```
+
+Model Diagnostics. 
+
+```{r gft_3: model diagnostics}
+
+resid_panel(gft_3_mod3)
+
+```
+
+
+### Umfang Engagement: Mentale Gesundheit und Soziales (Einzelitem)
+
+
+```{r gft_4: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+gft_4_mod1 <- lmer(gft_4 ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gft_4_mod1)
+
+tab_model(gft_4_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+gft_4_mod2 <- lmer(gft_4 ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gft_4_mod2)
+
+tab_model(gft_4_mod2)
+
+
+  #Modellvergleich
+
+anova(gft_4_mod1, gft_4_mod2, refit = FALSE)
+
+```
+
+```{r gft_4: model 3}
+
+gft_4_mod3 <- lmer(gft_4 ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gft_4_mod2)
+
+tab_model(gft_4_mod3)
+
+
+```
+
+Model Diagnostics. 
+
+```{r gft_4: model diagnostics}
+
+resid_panel(gft_4_mod3)
+
+```
+
+
+### Umfang Engagement: Unterricht (Einzelitem)
+
+
+```{r gft_5: models 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+
+gft_5_mod1 <- lmer(gft_5 ~ sex + age + sum_rrberfahrung +  (1|skz) + (1|skz:PersID), data = l_long)
+
+# summary(gft_5_mod1)
+
+tab_model(gft_5_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+gft_5_mod2 <- lmer(gft_5 ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+# summary(gft_5_mod2)
+
+tab_model(gft_5_mod2)
+
+
+  #Modellvergleich
+
+anova(gft_5_mod1, gft_5_mod2, refit = FALSE)
+
+  ## Modellvergleich signifikant: Daher Interpretation von Modell 3
+
+```
+
+```{r gft_5: model 3}
+
+  ## mod 3: conditional growth model (Treatmentgroup)
+
+gft_5_mod3 <- lmer(gft_5 ~ time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+# summary(gft_5_mod3)
+
+tab_model(gft_5_mod3)
+
+
+  #Modellvergleich 
+
+anova(gft_5_mod2, gft_5_mod3, refit = FALSE)
+
+```
+
+Main effect fuer treatment signifikant. Interaktion time*treatment nicht signifikant.
+
+
+Model Diagnostics. 
+
+```{r gft_5: model diagnostics}
+
+resid_panel(gft_5_mod3)
+
+```
+
+
+### GF fuer SchuelerInnen oder LehrerInnen
+
+
+```{r gfa: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+gfa_mod1 <- lmer(gfa ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gfa_mod1)
+
+tab_model(gfa_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+gfa_mod2 <- lmer(gfa ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gfa_mod2)
+
+tab_model(gfa_mod2)
+
+
+  #Modellvergleich
+
+anova(gfa_mod1, gfa_mod2, refit = FALSE)
+
+```
+
+Haupteffekt Treatmentgrouppe signifikant.
+
+```{r gfa: model 3}
+
+gfa_mod3 <- lmer(gfa ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gfa_mod2)
+
+tab_model(gfa_mod3)
+
+
+```
+
+Model Diagnostics. 
+
+```{r gfa: model diagnostics}
+
+resid_panel(gfa_mod3)
+
+```
+
+
+### Gesundheitszustand im Allgemeinen
+
+
+```{r gz: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+gz_mod1 <- lmer(gz ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gz_mod1)
+
+tab_model(gz_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+gz_mod2 <- lmer(gz ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gz_mod2)
+
+tab_model(gz_mod2)
+
+
+  #Modellvergleich
+
+anova(gz_mod1, gz_mod2, refit = FALSE)
+
+```
+
+Haupteffekt Treatmentgrouppe signifikant.
+
+```{r gz: model 3}
+
+gz_mod3 <- lmer(gz ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gz_mod2)
+
+tab_model(gz_mod3)
+
+```
+
+Model Diagnostics. 
+
+```{r gz: model diagnostics}
+
+resid_panel(gz_mod3)
+
+```
+
+
+### Lebenszufriedenheit - Leiter
+
+
+```{r lz: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+lz_mod1 <- lmer(lz ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lz_mod1)
+
+tab_model(lz_mod1)
+
+lz_mod2 <- lmer(lz ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lz_mod2)
+
+tab_model(lz_mod2)
+
+
+  #Modellvergleich
+
+anova(lz_mod1, lz_mod2, refit = FALSE)
+
+```
+
+
+Haupteffekt Treatmentgrouppe signifikant.
+
+```{r lz: model 3}
+
+lz_mod3 <- lmer(lz ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lz_mod2)
+
+tab_model(lz_mod3)
+
+```
+
+
+Model Diagnostics. 
+
+```{r lz: model diagnostics}
+
+resid_panel(lz_mod3)
+
+```
+
+
+### GF: Einzelitem
+
+
+```{r rgfe_2: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+rgfe_2_mod1 <- lmer(rgfe_2 ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(rgfe_2_mod1)
+
+tab_model(rgfe_2_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+rgfe_2_mod2 <- lmer(rgfe_2 ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(rgfe_2_mod2)
+
+tab_model(rgfe_2_mod2)
+
+
+  #Modellvergleich
+
+anova(rgfe_2_mod1, rgfe_2_mod2, refit = FALSE)
+
+```
+
+```{r rgfe_2: model 3}
+
+rgfe_2_mod3 <- lmer(rgfe_2 ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(rgfe_2_mod2)
+
+tab_model(rgfe_2_mod3)
+
+
+```
+
+Model Diagnostics. 
+
+```{r rgfe_2: model diagnostics}
+
+resid_panel(rgfe_2_mod3)
+
+```
+
+
+### Vertrauensvolle Beziehungen zu SuS
+
+
+```{r sus: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+sus_mod1 <- lmer(sus ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(sus_mod1)
+
+tab_model(sus_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+sus_mod2 <- lmer(sus ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(sus_mod2)
+
+tab_model(sus_mod2)
+
+
+  #Modellvergleich
+
+anova(sus_mod1, sus_mod2, refit = FALSE)
+
+```
+
+```{r sus: model 3, include = FALSE}
+
+sus_mod3 <- lmer(sus ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(sus_mod2)
+
+tab_model(sus_mod3)
+
+
+```
+
+
+Model Diagnostics. 
+
+```{r sus: model diagnostics}
+
+resid_panel(sus_mod3)
+
+```
+
+
+### Soziale Verbundenheit mit dem LK-Kollegium
+
+
+```{r lkkollegium: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+lkkollegium_mod1 <- lmer(lkkollegium ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkollegium_mod1)
+
+tab_model(lkkollegium_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+lkkollegium_mod2 <- lmer(lkkollegium ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkollegium_mod2)
+
+tab_model(lkkollegium_mod2)
+
+
+  #Modellvergleich
+
+anova(lkkollegium_mod1, lkkollegium_mod2, refit = FALSE)
+
+```
+
+```{r lkkollegium: model 3, include = FALSE}
+
+lkkollegium_mod3 <- lmer(lkkollegium ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkkollegium_mod2)
+
+tab_model(lkkollegium_mod3)
+
+```
+
+Model Diagnostics. 
+
+```{r lkkollegium: model diagnostics}
+
+resid_panel(lkkollegium_mod3)
+
+```
+
+
+### Klima im LK Kollegium
+
+
+```{r lkklima_kurz: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+lkklima_kurz_mod1 <- lmer(lkklima_kurz ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkklima_kurz_mod1)
+
+tab_model(lkklima_kurz_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+lkklima_kurz_mod2 <- lmer(lkklima_kurz ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkklima_kurz_mod2)
+
+tab_model(lkklima_kurz_mod2)
+
+
+  #Modellvergleich
+
+anova(lkklima_kurz_mod1, lkklima_kurz_mod2, refit = FALSE)
+
+```
+
+```{r lkklima_kurz: model 3}
+
+lkklima_kurz_mod3 <- lmer(lkklima_kurz ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(lkklima_kurz_mod2)
+
+tab_model(lkklima_kurz_mod3)
+
+
+```
+
+
+Model Diagnostics. 
+
+```{r lkklima_kurz: model diagnostics}
+
+resid_panel(lkklima_kurz_mod3)
+
+```
+
+
+### Transformationale Fuehrung der Schulleitung
+
+
+```{r tf: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+tf_mod1 <- lmer(tf ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(tf_mod1)
+
+tab_model(tf_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+tf_mod2 <- lmer(tf ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(tf_mod2)
+
+tab_model(tf_mod2)
+
+
+  #Modellvergleich
+
+anova(tf_mod1, tf_mod2, refit = FALSE)
+
+```
+
+```{r tf: model 3}
+
+tf_mod3 <- lmer(tf ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(tf_mod2)
+
+tab_model(tf_mod3)
+
+
+
+```
+
+
+Model Diagnostics. 
+
+```{r tf: model diagnostics}
+
+resid_panel(tf_mod3)
+
+```
+
+
+### Nuetzlichkeit von GF-Maßnahmen an Schule
+
+
+```{r gfn: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+gfn_mod1 <- lmer(gfn ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gfn_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+gfn_mod2 <- lmer(gfn ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gfn_mod2)
+
+tab_model(gfn_mod2)
+
+
+  #Modellvergleich
+
+anova(gfn_mod1, gfn_mod2, refit = FALSE)
+
+```
+
+```{r gfn: model 3}
+
+gfn_mod3 <- lmer(gfn ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gfn_mod2)
+
+tab_model(gfn_mod3)
+
+
+
+
+```
+
+Model Diagnostics. 
+
+```{r gfn: model diagnostics}
+
+resid_panel(gfn_mod3)
+
+```
+
+
+### Belastung durch GF-Maßnahmen an Schule
+
+
+```{r gfb: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+gfb_mod1 <- lmer(gfb ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gfb_mod1)
+
+tab_model(gfb_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+gfb_mod2 <- lmer(gfb ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gfb_mod2)
+
+tab_model(gfb_mod2)
+
+
+  #Modellvergleich
+
+anova(gfb_mod1, gfb_mod2, refit = FALSE)
+
+```
+
+```{r gfb: model 3}
+
+gfb_mod3 <- lmer(gfb ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gfb_mod2)
+
+tab_model(gfb_mod3)
+
+
+
+```
+
+Model Diagnostics. 
+
+```{r gfb: model diagnostics}
+
+resid_panel(gfb_mod3)
+
+```
+
+
+### Partizipation bei Planung und Umsetzung von GF an d. Schule
+
+
+```{r ps_planung: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+ps_planung_mod1 <- lmer(ps_planung ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(ps_planung_mod1)
+
+tab_model(ps_planung_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+ps_planung_mod2 <- lmer(ps_planung ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(ps_planung_mod2)
+
+tab_model(ps_planung_mod2)
+
+
+  #Modellvergleich
+
+anova(ps_planung_mod1, ps_planung_mod2, refit = FALSE)
+
+```
+
+```{r ps_planung: model 3}
+
+ps_planung_mod3 <- lmer(ps_planung ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(ps_planung_mod2)
+
+tab_model(ps_planung_mod3)
+
+```
+
+Model Diagnostics. 
+
+```{r ps_planung: model diagnostics}
+
+resid_panel(ps_planung_mod3)
+
+```
+
+### Wichtigkeit von Partizipation bei GF an d. Schule
+
+
+```{r ps_wichtig: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+ps_wichtig_mod1 <- lmer(ps_wichtig ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(ps_wichtig_mod1)
+
+tab_model(ps_wichtig_mod1)
+
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+ps_wichtig_mod2 <- lmer(ps_wichtig ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(ps_wichtig_mod2)
+
+tab_model(ps_wichtig_mod2)
+
+
+  #Modellvergleich
+
+anova(ps_wichtig_mod1, ps_wichtig_mod2, refit = FALSE)
+
+```
+
+Haupteffekt Treatmentgrouppe signifikant.
+
+```{r ps_wichtig: 3}
+
+ps_wichtig_mod3 <- lmer(ps_wichtig ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(ps_wichtig_mod2)
+
+tab_model(ps_wichtig_mod3)
+
+
+```
+
+Model Diagnostics. 
+
+```{r ps_wichtig: model diagnostics}
+
+resid_panel(ps_wichtig_mod3)
+
+```
+
+### Engagement fuer GF in der Schule
+
+
+```{r gfe_engage: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+gfe_engage_mod1 <- lmer(gfe_engage ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gfe_engage_mod1)
+
+tab_model(gfe_engage_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+gfe_engage_mod2 <- lmer(gfe_engage ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gfe_engage_mod2)
+
+tab_model(gfe_engage_mod2)
+
+
+  #Modellvergleich
+
+anova(gfe_engage_mod1, gfe_engage_mod2, refit = FALSE)
+
+```
+
+```{r gfe_engage: 3}
+
+gfe_engage_mod3 <- lmer(gfe_engage ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gfe_engage_mod2)
+
+tab_model(gfe_engage_mod3)
+
+
+
+```
+
+
+Model Diagnostics. 
+
+```{r gfe_engage: model diagnostics}
+
+resid_panel(gfe_engage_mod3)
+
+```
+
+
+### Wichtigkeit von GF in der Schule
+
+
+```{r gfe_wichtig: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+gfe_wichtig_mod1 <- lmer(gfe_wichtig ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gfe_wichtig_mod1)
+
+tab_model(gfe_wichtig_mod1)
+
+# mod 2: unconditional growth model (zeit als praediktor auf level 1)
+
+gfe_wichtig_mod2 <- lmer(gfe_wichtig ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gfe_wichtig_mod2)
+
+tab_model(gfe_wichtig_mod2)
+
+
+  #Modellvergleich
+
+anova(gfe_wichtig_mod1, gfe_wichtig_mod2, refit = FALSE)
+
+```
+
+```{r gfe_wichtig: model 3}
+
+gfe_wichtig_mod3 <- lmer(gfe_wichtig ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(gfe_wichtig_mod2)
+
+tab_model(gfe_wichtig_mod3)
+
+
+```
+
+Model Diagnostics. 
+
+```{r gfe_wichtig: model diagnostics}
+
+resid_panel(gfe_wichtig_mod3)
+
+```
+
+
+## Outcome fuer Fragestellung 3.1:
+
+### GF Rahmenbedingungen: Raeumliche Umgebung
+
+
+```{r ru: model 1-2, include = FALSE}
+
+# mod 1: unconditional intercept only
+
+ru_mod1 <- lmer(ru ~ sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(ru_mod1)
+
+tab_model(ru_mod1)
+
+ru_mod2 <- lmer(ru ~  time + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(ru_mod2)
+
+tab_model(ru_mod2)
+
+
+  #Modellvergleich
+
+anova(ru_mod1, ru_mod2, refit = FALSE)
+
+```
+
+Haupteffekt Treatmentgrouppe signifikant.
+
+```{r ru: model 3}
+
+ru_mod3 <- lmer(ru ~  time * Treatmentgroup + sex + age + sum_rrberfahrung + (1|skz) + (1|skz:PersID), data = l_long)
+
+#summary(ru_mod2)
+
+tab_model(ru_mod3)
+
+```
+
+Model Diagnostics. 
+
+```{r ru: model diagnostics}
+
+resid_panel(ru_mod3)
+
+```
+
+
